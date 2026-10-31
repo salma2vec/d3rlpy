@@ -1,0 +1,97 @@
+name: Validate multimodal dataset construction
+on:
+  push:
+    branches: [codex/validate-multimodal-dataset-build]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11']
+    env:
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      TEST_PERFORMANCE: 'FALSE'
+      KMP_DUPLICATE_LIB_OK: 'True'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 3
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install supported runtime and native development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.5.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e . -r dev.requirements.txt
+          mkdir -p reports test_data
+          pip freeze > reports/runtime.txt
+          git fetch origin 38c34b6f99fde82875e2ad81d1ba1f7a7da34137
+          sha256sum d3rlpy/base.py tests/test_dataset_build.py > reports/source-sha256.txt
+      - name: Verify regressions fail on upstream
+        run: |
+          cp d3rlpy/base.py reports/fixed_base.py
+          git show 38c34b6f99fde82875e2ad81d1ba1f7a7da34137:d3rlpy/base.py > d3rlpy/base.py
+          set +e
+          pytest -q tests/test_dataset_build.py --junitxml=reports/before.xml > reports/before.log 2>&1
+          result=$?
+          set -e
+          cat reports/before.log
+          cp reports/fixed_base.py d3rlpy/base.py
+          test "$result" = 1
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse('reports/before.xml').iter('testcase'))
+          assert len(cases) == 24
+          assert sum(c.find('failure') is not None for c in cases) == 12
+          assert all(c.find('error') is None and c.find('skipped') is None for c in cases)
+          for case in cases:
+              failed = case.find('failure') is not None
+              assert failed == ('list-' in case.attrib['name'] or 'tuple-' in case.attrib['name']), case.attrib
+          PY
+      - name: Verify corrected public build and training paths
+        run: pytest -q tests/test_dataset_build.py --junitxml=reports/after.xml
+      - name: Run native full unit suite
+        env:
+          PYTEST_ADDOPTS: --junitxml=reports/full.xml
+        run: ./scripts/test > reports/full.log 2>&1
+      - name: Run native static checks on unchanged base and candidate
+        if: always()
+        run: |
+          cp d3rlpy/base.py reports/fixed_base.py
+          cp tests/test_dataset_build.py reports/test_dataset_build.py
+          python - <<'PY'
+          import pathlib, subprocess
+          for phase in ('after', 'before'):
+              if phase == 'before':
+                  subprocess.run(['git','restore','--source=38c34b6f99fde82875e2ad81d1ba1f7a7da34137','--','d3rlpy'],check=True)
+                  pathlib.Path('tests/test_dataset_build.py').unlink()
+              for name, command in [('lint', ['./scripts/lint']), ('mypy', ['mypy','d3rlpy','reproductions','tests','examples'])]:
+                  result = subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  pathlib.Path(f'reports/{name}-{phase}.log').write_text(result.stdout)
+                  pathlib.Path(f'reports/{name}-{phase}.exit').write_text(str(result.returncode))
+          PY
+          cp reports/fixed_base.py d3rlpy/base.py
+          cp reports/test_dataset_build.py tests/test_dataset_build.py
+          black --check -l 80 d3rlpy/base.py tests/test_dataset_build.py
+          ruff check d3rlpy/base.py tests/test_dataset_build.py
+          python - <<'PY'
+          from pathlib import Path
+          def errors(phase):
+              return {line for line in Path(f'reports/mypy-{phase}.log').read_text().splitlines() if ': error:' in line}
+          new = errors('after') - errors('before')
+          assert not new, new
+          print('Inherited diagnostics:', len(errors('before')))
+          PY
+          sha256sum --check reports/source-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dataset-build-${{ matrix.python }}
+          path: reports
