@@ -1,7 +1,7 @@
 name: Validate initial-state evaluation
 on:
   push:
-    branches: [codex/validate-initial-state]
+    branches: [codex/validate-initial-state-lint]
 permissions:
   contents: read
 jobs:
@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.10', '3.11']
+        python: ['3.11']
     env:
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
@@ -33,40 +33,11 @@ jobs:
           pip install -e . -r dev.requirements.txt
           mkdir -p reports test_data
           pip freeze > reports/runtime.txt
-      - name: Fail-before evaluator regressions
-        shell: bash
-        run: |
-          cp d3rlpy/metrics/evaluators.py reports/fixed_evaluators.py
-          git show 38c34b6f99fde82875e2ad81d1ba1f7a7da34137:d3rlpy/metrics/evaluators.py > d3rlpy/metrics/evaluators.py
-          set +e
-          pytest tests/metrics/test_evaluators.py -k initial_state -q --junitxml=reports/before.xml > reports/before.log 2>&1
-          result=$?
-          set -e
-          cp reports/fixed_evaluators.py d3rlpy/metrics/evaluators.py
-          cat reports/before.log
-          test "$result" -eq 1
-          python - <<'PY'
-          import xml.etree.ElementTree as ET
-          suite = ET.parse('reports/before.xml').getroot().find('testsuite')
-          assert suite.attrib['tests'] == '29', suite.attrib
-          assert suite.attrib['failures'] == '19', suite.attrib
-          assert suite.attrib['errors'] == '0', suite.attrib
-          PY
-      - name: Pass-after evaluator regressions
-        run: pytest tests/metrics/test_evaluators.py -k initial_state -q --junitxml=reports/after.xml
-      - name: Native full unit suite
-        shell: bash
-        run: |
-          set +e
-          ./scripts/test > reports/full-suite.log 2>&1
-          result=$?
-          cat reports/full-suite.log
-          echo "$result" > reports/full-suite.exit
-          exit "$result"
       - name: Native static checks on base and fix
         if: always()
         shell: bash
         run: |
+          git fetch origin 03985d3f6d7a83a560e6f13efa799e33ab2c136f --depth=1
           git worktree add --detach /tmp/d3rlpy-lint-base 38c34b6f99fde82875e2ad81d1ba1f7a7da34137
           git worktree add --detach /tmp/d3rlpy-lint-fixed 03985d3f6d7a83a560e6f13efa799e33ab2c136f
           set +e
@@ -74,6 +45,8 @@ jobs:
           echo "$?" > reports/lint-before.exit
           (cd /tmp/d3rlpy-lint-fixed && CI=1 ./scripts/lint) > reports/lint-after.log 2>&1
           echo "$?" > reports/lint-after.exit
+          git -C /tmp/d3rlpy-lint-base restore .
+          git -C /tmp/d3rlpy-lint-fixed restore .
           (cd /tmp/d3rlpy-lint-base && mypy d3rlpy reproductions tests examples) > reports/mypy-before.log 2>&1
           echo "$?" > reports/mypy-before.exit
           (cd /tmp/d3rlpy-lint-fixed && mypy d3rlpy reproductions tests examples) > reports/mypy-after.log 2>&1
