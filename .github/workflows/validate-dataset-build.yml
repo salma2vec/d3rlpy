@@ -44,6 +44,10 @@ jobs:
           set -e
           cat reports/before.log
           cp reports/fixed_base.py d3rlpy/base.py
+          python reproduce_dataset_build.py > reports/public-after.log 2>&1
+          git show 38c34b6f99fde82875e2ad81d1ba1f7a7da34137:d3rlpy/base.py > d3rlpy/base.py
+          python reproduce_dataset_build.py --expect-failure > reports/public-before.log 2>&1
+          cp reports/fixed_base.py d3rlpy/base.py
           test "$result" = 1
           python - <<'PY'
           import xml.etree.ElementTree as ET
@@ -87,6 +91,14 @@ jobs:
               return {line for line in Path(f'reports/mypy-{phase}.log').read_text().splitlines() if ': error:' in line}
           new = errors('after') - errors('before')
           assert not new, new
+          for phase in ('before', 'after'):
+              log = Path(f'reports/lint-{phase}.log').read_text()
+              assert '+ docformatter ' in log and '+ mypy ' not in log
+              assert Path(f'reports/lint-{phase}.exit').read_text() == '3'
+          def docdiff(phase):
+              log = Path(f'reports/lint-{phase}.log').read_text()
+              return log[log.index('--- before/'):].splitlines()
+          assert docdiff('after') == docdiff('before')
           print('Inherited diagnostics:', len(errors('before')))
           PY
           sha256sum --check reports/source-sha256.txt
